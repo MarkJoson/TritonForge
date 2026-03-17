@@ -560,17 +560,202 @@ RL 训练涉及 **三个并行服务**，通过 tmux 在不同窗口中启动：
 - 负责高速推理，生成 Kernel 文本
 - 训练权重通过 Weight Synchronizer 定期同步到推理服务
 
-#### Rollout Buffer（轨迹缓冲区）
-- 异步收集生成经验
-- 管理 (prompt, response, reward) 三元组
-- 支持优先采样
-- 代码在 `SLIME/slime_plugins/rollout_buffer/buffer.py`
+---
 
-#### Eval Server（评测服务器）
-- 接收 Kernel 代码 → 编译 → 正确性 + 性能测试
-- 使用沙箱隔离执行，防止崩溃影响主进程
-- 默认端口 18188
-- 代码在 `KBenchEval/scripts/eval_server_subprocess.py`
+#### Rollout Buffer 深度解析
+
+**代码位置**：`SLIME/slime_plugins/rollout_buffer/buffer.py`
+**启动端口**：`8889`（FastAPI + uvicorn）
+
+##### 设计动机
+
+RL 训练中生成 Kernel 和更新参数是速度严重不匹配的两件事：
+每个 Kernel 需要 LLM 推理 + GPU 编译 + 执行评测（慢），而梯度更新需要批量数据（快消耗）。
+Buffer 的作用是在二者之间充当**异步解耦层**，让生成侧和训练侧能以各自最优速度运行。
+
+##### 内部架构
+
+```
+Generator (SGLang) ──write──▶ BufferQueue ──read──▶ GRPO 训练
+                              │
+                              ├─ temp_data   (原始轨迹备份，用于元信息统计)
+                              ├─ data        (活跃分组，按 instance_id 聚合)
+                              └─ group_timestamps (超时检测)
+```
+
+Buffer 以 **"分组（Group）"** 为最小消费单位，而非单条轨迹：
+- 同一道 KernelBench 题目的多次 Rollout（`n_samples_per_prompt` 个）构成一个 Group
+- GRPO 算法需要 Group 内的对比才能计算相对奖励（Group-Relative Returns）
+- `group_size = n_samples_per_prompt`（默认 8）
+
+##### Group 的生命周期
+
+```
+append() ──▶ temp_data & data 按 instance_id 分组聚合
+                │
+          is_valid_group() 判断
+                │
+       ┌────────┴─────────┐
+   is_finished?        is_timed_out?
+   (收够 group_size)   (超过 300s 未更新)
+       │                  │ actual_ratio ≥ 70%?
+       ▼                  ▼
+   normalize()        normalize()   ← 都继续处理
+       │
+   pad()       ← 不足 group_size 时填充到标准大小
+       │
+   get_batch() 返回给训练侧
+```
+
+| 参数 | 默认值 | 作用 |
+|------|--------|------|
+| `group_timeout_seconds` | 300s | 超时的 Group 若凑够 70% 也可释放 |
+| `min_valid_group_size_ratio` | 1.0 | Group 必须收满才算 valid |
+| `min_valid_item_size_ratio` | 0.7 | 过滤后有效 item ≥ 70% 才 normalize |
+
+##### 奖励归一化流程
+
+Buffer 在交给训练侧之前会对奖励做 Group 内归一化（`normalize_group_data`），以减少跨题目的奖励方差：
+
+```
+# 注释摘自源码第 1 行
+# raw reward → normalized reward（仅对 valid reward 执行）
+# 乘以 group_size / valid_size，与 GRPO 奖励对齐
+```
+
+##### HTTP API 一览
+
+| Endpoint | 方法 | 调用方 | 说明 |
+|----------|------|--------|------|
+| `/start_rollout` | POST | SLIME 主进程 | 触发异步 Rollout（后台任务），携带 task_type 等参数 |
+| `/buffer/write` | POST | Generator | 写入单条轨迹数据 |
+| `/get_rollout_data` | POST | SLIME 主进程 | 读取一批训练数据（含 normalize + pad），同时持久化到 `rollout_data/` |
+| `/buffer/read` | POST | 调试用 | 直接读 buffer（不落盘） |
+| `/buffer/stats` | GET | 监控 | 查看 buffer 大小、读写计数 |
+
+调用 `/get_rollout_data` 返回的每条数据包含：
+
+```json
+{
+  "instance_id": "level1_problem19",
+  "prompt": "...",
+  "response": "@triton.jit\ndef kernel(...)",
+  "reward": 1.1,
+  "execution_details": {
+    "compiled": true,
+    "correctness": true,
+    "speedup": 1.8
+  }
+}
+```
+
+Buffer 还会打印批次统计到日志：编译率、正确率、加速比分布（正/负 speedup 分别统计）。
+
+##### 生成器插件发现机制
+
+Buffer 启动时通过 `discover_generators()` **自动扫描** `generator/` 目录下所有 `*_generator.py` 文件，读取每个文件中定义的 `TASK_TYPE` 常量来注册对应的生成器。添加新任务类型只需新建文件，无需修改 buffer 主体。
+
+---
+
+#### Eval Server 深度解析
+
+**代码位置**：`KBenchEval/scripts/eval_server_subprocess.py`
+**启动端口**：`18188`（FastAPI + uvicorn）
+
+##### 设计动机：为什么需要进程隔离？
+
+直接在主进程中执行 LLM 生成的 Kernel 有三个危险：
+1. **GPU Context 污染**：一个 Kernel 越界写内存后，同一 CUDA Context 内的后续 Kernel 结果不可信
+2. **GPU core dump**：AMD 平台尤其严重，崩溃会导致整个容器失去响应
+3. **Triton 缓存竞争**：多个进程共享缓存目录导致 JIT 编译结果相互干扰
+
+解决方案：**每次评测都 spawn 一个独立子进程**（`mp.Pool(processes=1)`），子进程死亡不影响父进程。
+
+```
+主服务进程 (18188)
+    │
+    │  POST /eval
+    ▼
+acquire GPU device (asyncio.Lock 保护)
+    │
+    ├── spawn 子进程
+    │       ├── 设置 CUDA_VISIBLE_DEVICES=device_id
+    │       ├── 设置 TRITON_CACHE_DIR=/tmp/triton_cache_gpu_{id}  ← 隔离缓存
+    │       ├── import eval_kernel_against_ref()
+    │       └── 返回 KernelExecResult（pickle 序列化）
+    │
+release GPU device
+    │
+    └── 返回 JSON 给调用方
+```
+
+##### GPU 设备池管理
+
+服务启动时检测所有可用 GPU，维护一个 `available_devices` 列表：
+
+```python
+# 并发安全：asyncio.Lock + asyncio.Semaphore 双重保护
+gpu_semaphore = asyncio.Semaphore(NUM_GPUS)  # 限制并发评测数
+device_lock   = asyncio.Lock()               # 保护 available_devices 列表
+```
+
+每个请求独占一块 GPU，评测完毕后归还。若所有 GPU 都忙，请求阻塞等待信号量。
+
+##### 错误分类与处理
+
+子进程如果出错，会返回结构化的错误信息（而非直接抛异常），主进程根据 `category` 字段决定返回码：
+
+| category | 原因 | HTTP 状态码 |
+|----------|------|-------------|
+| `shared_memory_exceeded` | Triton Kernel 申请共享内存超硬件上限 | 500 |
+| `illegal_memory_access` | Kernel 越界访问，GPU 报 SIGILL | 500 |
+| `unsupported_architecture` | 编译目标架构不匹配 | 500 |
+| `syntax_error` | Kernel 代码有 Python 语法错误 | 500 |
+| timeout (600s) | Kernel 编译 / 执行无响应 | 504 |
+
+> [!TIP]
+> 600 秒的超时是有意为之：子进程需要 spawn 开销 + CUDA context 初始化 + Triton JIT 编译（**无跨进程缓存**），复杂 Kernel 可能需要几分钟。
+
+##### 平台自适应初始化
+
+服务器启动时检测是否为 AMD 环境，并自动调整所有后续子进程的环境变量：
+
+```python
+if 'HIP_VISIBLE_DEVICES' in os.environ or os.path.exists('/opt/rocm'):
+    IS_AMD_GPU = True
+    # 子进程中设置 HIP_PLATFORM=amd，PYTORCH_ROCM_ARCH=gfx942
+    # 禁用所有 core dump（HSA_ENABLE_COREDUMP=0 等）
+    # HIP_LAUNCH_BLOCKING=1（AMD 同步调试）
+else:
+    IS_AMD_GPU = False
+    # 子进程中 TORCH_USE_CUDA_DSA=1，CUDA_LAUNCH_BLOCKING=1
+```
+
+##### HTTP API 一览
+
+| Endpoint | 方法 | 说明 |
+|----------|------|------|
+| `/eval` | POST | 核心评测接口，接受 Kernel 代码，返回 `KernelExecResult` |
+| `/health` | GET | 每块 GPU 的健康状态（在子进程内检测，避免污染） |
+| `/gpu_status` | GET | 显存占用、可用设备列表 |
+| `/backend_info` | GET | 支持的 backend（cuda / triton）及平台信息 |
+| `/reset_devices` | POST | 重置设备池（调试用） |
+
+`/eval` 请求体：
+
+```json
+{
+  "original_model_src": "PyTorch 参考实现代码（字符串）",
+  "custom_model_src":   "LLM 生成的 Triton Kernel 代码（字符串）",
+  "num_correct_trials": 5,
+  "num_perf_trials":    100,
+  "backend":            "triton",
+  "measure_performance": true,
+  "verbose": false
+}
+```
+
+返回的 `KernelExecResult` 包含：`compiled`、`correctness`、`speedup`、`runtime_ms` 等字段，这些直接用于奖励函数的计算。
 
 ### 6.3 启动 Multi-Turn RL 训练
 
