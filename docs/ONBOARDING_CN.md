@@ -931,7 +931,123 @@ slime_plugins/
 └── mbridge/                   # Megatron Bridge 桥接层
 ```
 
-### 7.4 跨平台适配要点
+### 7.4 TritonForge SLIME vs 官方 THUDM/slime 差异对比
+
+TritonForge 的 `SLIME/` 目录是 [THUDM/slime](https://github.com/THUDM/slime) 官方仓库的一个定制化分支。以下是基于源码 `diff` 的逐层级对比。
+
+#### 总览
+
+| 组件 | 变化程度 | 说明 |
+|------|---------|------|
+| `slime/` 核心框架 | ✅ **完全一致** | Ray 编排、Megatron/SGLang 后端、rollout 逻辑等零修改 |
+| `tools/` 转换工具 | ✅ **完全一致** | HF ↔ Megatron 格式转换工具保持不变 |
+| `train.py` / `train_async.py` | ⚠️ **大幅重写** | 移除 Critic、简化训练循环 |
+| `slime_plugins/` | ⚠️ **深度定制** | 剥离通用模型支持，新增 Kernel 生成器和奖励系统 |
+| `scripts/` | 🔄 **全部替换** | 通用 RL 脚本替换为 KBench 专用脚本 |
+| `pyproject.toml` | 🔧 **微调** | 移除 isort/ruff 高级 lint 配置 |
+
+#### 1. `slime/` 核心框架 — 零修改
+
+`slime/backends/`、`slime/ray/`、`slime/rollout/`、`slime/utils/` 下所有文件与官方仓库完全一致。这意味着 TritonForge 是对 SLIME 的 **应用层定制** 而非框架层 fork，上游更新可以较安全地合并。
+
+#### 2. `train.py` / `train_async.py` — 简化训练入口
+
+| 方面 | 官方 THUDM/slime | TritonForge 分支 |
+|------|-----------------|-----------------|
+| **Critic 模型** | ✅ 支持 Actor-Critic（创建 `critic_model`、`critic_model.async_train()`） | ❌ 完全移除，仅保留 Actor（GRPO 不需要 Critic） |
+| **Rollout 管理** | `rollout_manager` 对象封装生成逻辑 | 拆分为 `actor_model` + `rollout_generator` 两个独立 Actor |
+| **权重同步** | `actor_model.update_weights()` (同步) | `actor_model.async_update_weights()` (异步) |
+| **日志/跟踪** | `configure_logger()` + `init_tracking()` + `finish_tracking()` | 移除内置日志/WandB 跟踪（依赖脚本参数 `--use-wandb`） |
+| **Offload 策略** | 分离 `offload_train` / `offload_rollout` | 统一 `offload` 标志 |
+| **检查点保存** | 支持 Actor + Critic 独立保存 | 仅保存 Actor |
+| **权重校验** | `check_weight_update_equal` verifies sync | 移除 |
+
+> 核心简化逻辑：官方 SLIME 是一个通用 RL 框架（支持 Actor-Critic、PPO 等），TritonForge 只使用 GRPO（不需要 Critic），因此可以大幅简化训练循环。
+
+#### 3. `buffer.py` — Rollout Buffer 重大增强
+
+TritonForge 对 buffer 的改动最为深入，主要新增：
+
+| 改动 | 官方版本 | TritonForge 版本 |
+|------|---------|-----------------|
+| **Group 超时机制** | ❌ 无 | ✅ `group_timeout_seconds=300s`，超时且 ≥70% 的 Group 可提前释放 |
+| **Item 过滤** | ❌ 无 | ✅ `filter_item_func` — 逐条过滤无效项（如空 response） |
+| **奖励归一化** | ❌ 无 | ✅ `normalize_group_data` — Group 内归一化，乘以 `group_size/valid_size` 对齐 GRPO |
+| **Group 填充** | ❌ 无 | ✅ `pad_group_data` — Group 不足 `group_size` 时填充到标准大小 |
+| **Valid/Finished 语义** | `is_valid_group` 返回 bool | 返回 `(is_valid, is_finished)` 元组，区分"数据完整"和"可以消费" |
+| **默认函数** | 内联在 buffer.py 中 | 抽取到 `generator/utils/default_func.py`，支持生成器覆盖 |
+| **生成器发现** | 扫描 `*.py` | 仅扫描 `*_generator.py`，更精确 |
+| **数据持久化** | ❌ 无 | ✅ `save_data_to_local()` — 每批数据落盘到 `rollout_data/`，附带统计摘要 |
+| **可视化** | ❌ 无 | ✅ `BufferStatsVisualizer` — 60 秒时间窗口内数据吞吐量统计图 |
+| **类型注解** | `dict[str, Any] | None` (Python 3.10+) | `Optional[Dict[str, Any]]` (兼容 3.9) |
+
+> 这些改动的目的是让 Buffer 适配 GPU Kernel 生成场景：超时机制解决了某些 Kernel 编译耗时过长导致 Group 永远凑不够的问题；奖励归一化减少跨题目的方差；数据持久化方便事后分析。
+
+#### 4. `slime_plugins/` — 模型支持替换为 Kernel 生成器
+
+**官方有但 TritonForge 移除的模型支持**：
+
+| 模型 | 文件 |
+|------|------|
+| DeepSeek-V3 | `mbridge/deepseek_v32.py`, `models/gpt_oss.py` |
+| GLM-4 MoE | `mbridge/glm4moe.py`, `mbridge/glm4moe_lite.py` |
+| GLM-5 | `models/glm5/` |
+| Kimi-K2 | （通过 `gpt_oss` 支持） |
+| MIMO | `mbridge/mimo.py` |
+| Qwen3.5 / Qwen3-next | `mbridge/qwen3_5.py`, `mbridge/qwen3_next.py` |
+| Flash Attention / Learnable Softmax | `models/flash_dot_product_attention.py`, `models/learnable_softmax_attention.py`, `models/hf_attention.py` |
+
+**TritonForge 新增的 Kernel 生成专用文件**：
+
+| 文件 | 用途 |
+|------|------|
+| `generator/kernel_generator.py` | 单轮 Kernel 生成器（`TASK_TYPE="kernelbench"`） |
+| `generator/multi_turn_kernel_generator.py` | 多轮迭代生成器（`TASK_TYPE="kernelbench_multiturn"`） |
+| `generator/kernelbench_config.py` | 奖励函数 + Prompt 模板 + 评测配置 |
+| `generator/triton_ops.py` | Triton 算子辅助工具 |
+| `generator/reward_utils/` | 奖励计算和归一化工具集 |
+| `generator/utils/` | 默认函数、数据处理工具 |
+| `rollout_buffer/buffer_tools/` | Buffer 可视化、数据分析脚本 |
+
+> 官方 SLIME 支持 15+ 种模型的 RL 训练；TritonForge 只保留 Qwen3-8B + GLM4 支持，但新增了整套 KernelBench 生成 + 评测 + 奖励基础设施。
+
+#### 5. `scripts/` — 全部替换
+
+**官方提供的脚本**（已移除）：
+
+通用 RL 训练脚本，覆盖 DeepSeek-R1、GLM-4/5、Kimi-K2、MIMO、Qwen3-4B/30B/235B 等 15+ 个模型配置。
+
+**TritonForge 新增的脚本**：
+
+| 脚本 | 用途 |
+|------|------|
+| `run-qwen3-8B-kernelbook-sft.sh` | SFT 训练（KernelBook 数据集） |
+| `run_agent_kbench_*_nv_*.sh` | NVIDIA Multi-Turn / Single-Turn RL |
+| `run_agent_kbench_*_amd_*.sh` | AMD Multi-Turn / Single-Turn RL |
+| `agent-example-kbench-*.sh` | 实际训练参数配置（被 `run_agent_kbench_*` 调用） |
+
+模型配置脚本也做了精简：官方有 22 个模型配置，TritonForge 保留了 Qwen3-8B 为主的少量配置，并对部分参数做了调整。
+
+#### 总结
+
+```mermaid
+graph LR
+    subgraph O["官方 THUDM/slime"]
+        O1["通用 RL 框架"] --> O2["15+ 模型支持"]
+        O1 --> O3["Actor-Critic"]
+        O1 --> O4["通用训练脚本"]
+    end
+    subgraph T["TritonForge SLIME"]
+        T1["核心不变"] --> T2["Qwen3-8B 专用"]
+        T1 --> T3["GRPO-only（无 Critic）"]
+        T1 --> T4["KBench 训练脚本"]
+        T1 --> T5["Kernel 生成器 + 奖励系统"]
+        T1 --> T6["Buffer 增强（超时/归一化/持久化）"]
+    end
+    O1 -.->|fork| T1
+```
+
+### 7.5 跨平台适配要点
 
 #### NVIDIA → AMD 主要差异
 
@@ -952,7 +1068,7 @@ export GPU_MAX_HW_QUEUES=1      # 限制硬件队列数（提升稳定性）
 export HSA_ENABLE_COREDUMP=0    # 禁用 core dump（防止容器崩溃）
 ```
 
-### 7.5 常见问题排查
+### 7.6 常见问题排查
 
 #### Q1: 评测服务器报 CUDA OOM
 
@@ -982,7 +1098,7 @@ lsof -i :30000
 nvidia-smi  # 或 rocm-smi
 ```
 
-### 7.6 实验结果参考
+### 7.7 实验结果参考
 
 | 模型 | Level 1 Pass@1 | Level 2 Pass@1 | 备注 |
 |------|---------------|---------------|------|
@@ -995,7 +1111,7 @@ nvidia-smi  # 或 rocm-smi
 - 微调后模型平均提升 **25-30%**
 - 多轮设置下编译成功率 **>90%**
 
-### 7.7 贡献指南
+### 7.8 贡献指南
 
 欢迎以下方向的贡献：
 
