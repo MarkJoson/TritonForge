@@ -862,6 +862,127 @@ Weight Sync → 更新 SGLang 权重
     ↓ 重复
 ```
 
+### 6.7 训练时开启的网络服务汇总
+
+SLIME RL 训练涉及多个子系统协同工作，每个子系统都会在本地或节点网络上开放端口。以下是完整的服务清单。
+
+#### 端口总览
+
+| 服务 | IP | 端口 | 协议 | 固定/动态 |
+|------|-----|------|------|----------|
+| **Ray GCS（集群控制）** | `MASTER_ADDR`（默认 `127.0.0.1`） | `6379` | TCP | 固定 |
+| **Ray Dashboard / Job API** | `127.0.0.1` | **`8265`** | HTTP | 固定 |
+| **SGLang Router（负载均衡）** | 本节点 IP | `3000~5000` 随机 | HTTP | 动态 |
+| **SGLang Server × N（每个 Engine）** | 本节点 IP | `≥ 10000` 动态扫描 | HTTP | 动态 |
+| **SGLang NCCL × N** | 本节点 IP | `≥ 10001` 动态扫描 | TCP | 动态 |
+| **SGLang dist_init × N** | 本节点 IP | `≥ 10002` 动态扫描 | TCP | 动态 |
+| **Torch DDP Master（训练 Actor）** | 本节点 IP | `≥ 20000` 动态扫描 | TCP | 动态 |
+| **权重更新 NCCL Group** | 本节点 IP | OS 随机分配 | TCP | 动态 |
+| **Rollout Buffer（轨迹缓冲区）** | `0.0.0.0` | **`8889`** | HTTP | 固定 |
+| **Eval Server（评测服务器）** | `0.0.0.0` | **`18188`** | HTTP | 固定 |
+
+> [!TIP]
+> 只有 4 个端口是固定的：Ray GCS `6379`、Ray Dashboard `8265`、Rollout Buffer `8889`、Eval Server `18188`。其余均由代码动态扫描空闲端口分配，请注意防火墙规则开放对应端口段（`10000~30000`）。
+
+---
+
+#### Ray 集群（`ray start --head`）
+
+- **GCS 端口 `6379`**：Ray 头节点的全局控制服务，所有 Worker 节点向此注册。  
+- **Dashboard 端口 `8265`**：提供 Web UI 及 Job 提交入口，训练脚本中通过 `ray job submit --address="http://127.0.0.1:8265"` 提交作业。
+
+```bash
+# 訓練脚本中的启动命令
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus N --disable-usage-stats
+```
+
+浏览器访问监控面板：`http://localhost:8265`
+
+---
+
+#### SGLang Router（负载均衡）
+
+当存在多个 Rollout Engine 时，`RolloutGroup.start_router()` 自动拉起 `sglang_router`，在随机端口上提供统一的推理入口：
+
+```python
+# rollout.py 中的初始化逻辑
+self.args.sglang_router_port = find_available_port(random.randint(3000, 4000))
+```
+
+| 接口路径 | 方法 | 说明 |
+|---------|------|------|
+| `/add_worker?url=...` | POST | 注册新的 SGLang Engine |
+| `/remove_worker?url=...` | POST | 下线 Engine |
+| `/generate` | POST | 代理生成请求（Rollout 阶段使用） |
+| `/list_workers` | GET | 列出所有活跃 Engine |
+
+---
+
+#### SGLang Server（每个 Rollout Engine）
+
+每个 `SglangEngine` 实例会在本节点 IP 上启动一个独立的 HTTP Server，端口从 `10000` 开始动态扫描空闲端口，每个 Engine 还会额外占用：
+- 1 个 **NCCL 通信端口**（tensor parallel 内通信）
+- `6 + dp_size` 个连续端口用于 **分布式初始化（dist_init_addr）**
+
+```python
+# rollout.py 端口分配注释
+# 1. server port    ← SGLang HTTP 服务
+# 2. nccl port      ← Engine 内 NCCL
+# 3. dist_init_addr ← 多节点分布式初始化
+# 4. dp_attention ports（4 + dp_size 个）
+```
+
+Engine 级别的核心 HTTP 接口（由训练主进程通过 Router 或直连调用）：
+
+| 接口路径 | 方法 | 触发时机 |
+|---------|------|---------|
+| `/health_generate` | GET | 启动健康检查，等待 Server 就绪 |
+| `/flush_cache` | GET | 每次权重更新前清空 KV Cache |
+| `/generate` | POST | Rollout 阶段文本生成 |
+| `/init_weights_update_group` | POST | 初始化训练→推理权重同步的 NCCL Group |
+| `/update_weights_from_distributed` | POST | 接收 NCCL Broadcast 更新的权重（非 Colocate 模式） |
+| `/update_weights_from_tensor` | POST | 接收 IPC 传递的权重（Colocate 模式） |
+| `/release_memory_occupation` | POST | offload 时释放 GPU 显存 |
+| `/resume_memory_occupation` | POST | 恢复 GPU 显存占用 |
+| `/pause_generation` | POST | 权重更新前暂停生成 |
+| `/continue_generation` | POST | 权重更新后恢复生成 |
+
+---
+
+#### 训练 Actor（PyTorch 分布式）
+
+`TrainRayActor`（Megatron-LM 训练进程）通过两个端口与其他进程通信：
+
+- **Torch DDP Master Port**（`≥ 20000`）：Actor group 内部的分布式初始化 rendezvous，由 rank 0 自动扫描并广播给其他 rank。
+- **权重更新 NCCL Group Port**（OS 随机分配）：专门为 Actor → SGLang 权重广播创建的 process group。
+
+---
+
+#### Rollout Buffer（固定端口 `8889`）
+
+详见 [6.2 Rollout Buffer 深度解析](#rollout-buffer-深度解析)。FastAPI + uvicorn 服务，固定监听 `0.0.0.0:8889`。
+
+---
+
+#### Eval Server（固定端口 `18188`）
+
+详见 [6.2 Eval Server 深度解析](#eval-server-深度解析)。FastAPI + uvicorn 服务，固定监听 `0.0.0.0:18188`。
+
+---
+
+#### 服务启动顺序
+
+```
+1. ray start --head          → GCS:6379 + Dashboard:8265 就绪
+2. RolloutGroup.start_router()→ SGLang Router:3000~5000 就绪
+3. SglangEngine × N 初始化   → Server:≥10000 + NCCL:≥10001 就绪
+4. TrainRayActor 初始化      → Torch DDP Master:≥20000 就绪
+5. connect_rollout_engines() → 权重更新 NCCL Group 建立
+   ↑ 以上由 SLIME 自动管理（窗口 1）
+6. buffer.py 启动            → Rollout Buffer:8889 就绪（窗口 2）
+7. eval_server.py 启动       → Eval Server:18188 就绪（窗口 3）
+```
+
 ---
 
 ## 第七章：高级主题与贡献
