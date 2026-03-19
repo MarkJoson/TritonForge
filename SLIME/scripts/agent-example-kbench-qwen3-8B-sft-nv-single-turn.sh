@@ -28,9 +28,9 @@ export CP_SIZE=2    # Context parallelism (total_model_size = 2*1*2 = 4, matches
 # Model paths - Updated for Qwen3-8B
 PROJECT_ROOT=/root
 export HF_MODEL_PATH="${PROJECT_ROOT}/models/Qwen3-8B"
-export MCORE_MODEL_PATH="${PROJECT_ROOT}/models/Qwen3-8B-Kernelbook-SFT-filtered"
+export MCORE_MODEL_PATH="${PROJECT_ROOT}/models/Qwen3-8B-ml"
 export PROMPT_DATA="${PROJECT_ROOT}/TritonForge/SLIME/data/kernel_bench/kernel_bench_triton_level_1_2.jsonl"
-export MCORE_MODEL_PATH_SAVE="${PROJECT_ROOT}/models/Qwen3-8B-Kernelbook-SFT-filtered_save"
+export MCORE_MODEL_PATH_SAVE="${PROJECT_ROOT}/models/Qwen3-8B-ml_save"
 
 # Qwen3-8B model architecture parameters
 MODEL_ARGS=(
@@ -143,8 +143,9 @@ WANDB_ARGS=(
 )
 
 # Launch the master node of ray in container
-export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+export MASTER_ADDR=${MASTER_ADDR:-"0.0.0.0"}
 export MASTER_PORT=${MASTER_PORT:-"12345"}
+export ROLLOUT_BUFFER_URL=${ROLLOUT_BUFFER_URL:-"127.0.0.1"}
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 6 --disable-usage-stats
 
@@ -178,7 +179,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    ${GRPO_ARGS[@]} \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
-   --agent-rollout-buffer-url http://${MASTER_ADDR}:8889 \
+   --agent-rollout-buffer-url http://${ROLLOUT_BUFFER_URL}:8889 \
    --disable-rewards-normalization \
    --offload-old-actor \
    --offload-ref \

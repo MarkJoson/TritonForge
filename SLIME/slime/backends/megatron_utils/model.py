@@ -167,11 +167,11 @@ def forward_only(args, model, data_iterator, num_microbatches, store_prefix=""):
     for model_module in model:
         model_module.eval()
 
-    if args.custom_megatron_before_log_prob_hook_path:
-        from slime.utils.misc import load_function
+    # if args.custom_megatron_before_log_prob_hook_path:
+    #     from slime.utils.misc import load_function
 
-        custom_before_log_prob_hook = load_function(args.custom_megatron_before_log_prob_hook_path)
-        custom_before_log_prob_hook(args, model, store_prefix)
+    #     custom_before_log_prob_hook = load_function(args.custom_megatron_before_log_prob_hook_path)
+    #     custom_before_log_prob_hook(args, model, store_prefix)
 
     forward_backward_func = get_forward_backward_func()
     # Don't care about timing during evaluation

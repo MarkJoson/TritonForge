@@ -145,6 +145,7 @@ def init(args):
             name=run_name,
             config=args.__dict__,
             settings=wandb.Settings(mode="shared", x_primary=True),
+            mode='offline'
         )
 
         wandb.define_metric("train/step")
