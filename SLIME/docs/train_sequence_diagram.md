@@ -21,7 +21,7 @@ sequenceDiagram
     %% ═══════════════════════════════════════
     %% Phase 1: 参数解析
     %% ═══════════════════════════════════════
-    rect rgb(40, 40, 80)
+    rect rgb(120, 120, 180)
     Note over Main,Args: Phase 1: 参数解析
     Main->>Args: parse_args()
     Args-->>Main: args
@@ -30,7 +30,7 @@ sequenceDiagram
     %% ═══════════════════════════════════════
     %% Phase 2: 资源分配 (Placement Groups)
     %% ═══════════════════════════════════════
-    rect rgb(40, 80, 40)
+    rect rgb(120, 180, 120)
     Note over Main,PG: Phase 2: GPU 资源预分配
     Main->>PG: create_placement_groups(args)
     PG->>PG: _create_placement_group(num_gpus)
@@ -41,7 +41,7 @@ sequenceDiagram
     %% ═══════════════════════════════════════
     %% Phase 3: 创建 Actor Group
     %% ═══════════════════════════════════════
-    rect rgb(80, 40, 40)
+    rect rgb(240, 120, 120)
     Note over Main,TRA: Phase 3: 创建训练 Actor 组
     Main->>PG: create_actor_group(args, pgs["actor"])
     PG->>PG: allocate_train_group(num_nodes, num_gpus, pg)
@@ -56,7 +56,7 @@ sequenceDiagram
     %% ═══════════════════════════════════════
     %% Phase 4: 创建 Rollout Group
     %% ═══════════════════════════════════════
-    rect rgb(80, 60, 20)
+    rect rgb(160, 120, 40)
     Note over Main,SG: Phase 4: 创建 Rollout 推理组
     Main->>PG: create_rollout_group(args, pgs["rollout"])
     PG->>RG: new RolloutGroup(args, pg)
@@ -75,7 +75,7 @@ sequenceDiagram
     %% ═══════════════════════════════════════
     %% Phase 5: 初始化
     %% ═══════════════════════════════════════
-    rect rgb(50, 50, 80)
+    rect rgb(150, 150, 220)
     Note over Main,MU: Phase 5: 模型初始化
     Main->>ATG: async_init(args, role="actor", with_ref=...)
     ATG->>TRA: init.remote(args, role, with_ref)
@@ -98,7 +98,7 @@ sequenceDiagram
     %% ═══════════════════════════════════════
     %% Phase 6: 首次权重同步
     %% ═══════════════════════════════════════
-    rect rgb(60, 40, 60)
+    rect rgb(240, 160, 240)
     Note over Main,SG: Phase 6: 首次权重同步
     opt offload
         Main->>RG: async_onload()
@@ -114,7 +114,7 @@ sequenceDiagram
     %% ═══════════════════════════════════════
     %% Phase 7: 训练循环
     %% ═══════════════════════════════════════
-    rect rgb(30, 60, 60)
+    rect rgb(90, 180, 180)
     Note over Main,MU: Phase 7: 训练主循环 (for rollout_id in range(...))
 
     opt eval_interval 且 rollout_id == 0
