@@ -570,6 +570,13 @@ class RayTrainGroup:
     """
     A group of ray actors
     Functions start with 'async' should return list of object refs
+    
+    Ray 训练 Actor 的管理类，持有 TrainRayActor 类的句柄，负责：
+    - 初始化
+    - 同步权重
+    - 训练
+    - 评估
+    - 保存...
 
     Args:
         num_nodes (int): Number of nodes for this actor group.
@@ -582,8 +589,8 @@ class RayTrainGroup:
 
     def __init__(
         self,
-        num_nodes,
-        num_gpus_per_node,
+        num_nodes,                              # 训练一共使用的节点个数
+        num_gpus_per_node,                      # 每个节点的GPU个数
         pg: tuple[PlacementGroup, list[int]],
         num_gpus_per_actor=1,
         resources: Dict[str, float] = None,
@@ -600,7 +607,7 @@ class RayTrainGroup:
         self._allocate_gpus_for_actor(pg, num_gpus_per_actor)
 
     def _allocate_gpus_for_actor(self, pg, num_gpus_per_actor):
-        world_size = self._num_nodes * self._num_gpus_per_node
+        world_size = self._num_nodes * self._num_gpus_per_node      # train总共使用的 gpu 个数
 
         # Use placement group to lock resources for models of same type
         assert pg is not None
@@ -611,13 +618,14 @@ class RayTrainGroup:
         for rank in range(world_size):
             actor = TrainRayActor.options(
                 num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
+                num_gpus=num_gpus_per_actor,                        # GPU, CPU 个数 1:1
                 resources=self._resources,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
                     placement_group_bundle_index=reordered_bundle_indices[rank],
                 ),
             ).remote(world_size, rank, master_addr, master_port)
+            # 创建第一个节点后获取其MasterIP，MasterPort
             if rank == 0:
                 master_addr, master_port = ray.get(actor.get_master_addr_and_port.remote())
             self._actor_handlers.append(actor)

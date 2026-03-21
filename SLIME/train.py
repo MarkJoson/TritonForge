@@ -6,12 +6,15 @@ from slime.utils.arguments import parse_args
 
 def train(args):
     # allocate the GPUs
-    pgs = create_placement_groups(args)
-
-    actor_model = create_actor_group(args, pgs["actor"])
+    # 分配GPU组
+    pgs = create_placement_groups(args)     # {"actor": (pg, pg_ids), "rollout": (pg, pg_ids)}
+    
+    # 创建训练Actor组
+    actor_model = create_actor_group(args, pgs["actor"])    # 返回RayTrainGroup对象
 
     # create the rollout generator, with sglang engines inside.
-    rollout_generator = create_rollout_group(args, pgs["rollout"])
+    # 创建Rollout组
+    rollout_generator = create_rollout_group(args, pgs["rollout"])      # 返回RolloutGroup对象
 
     # calculate num_rollout from num_epoch
     num_rollout_per_epoch = None
@@ -21,6 +24,7 @@ def train(args):
     assert args.num_rollout > 0
 
     # sync the initialization (model initalization, load checkpoint, etc.)
+    # 模型权重初始化
     start_rollout_ids = ray.get(
         actor_model.async_init(args, role="actor", with_ref=args.kl_coef != 0 or args.use_kl_loss)
     )

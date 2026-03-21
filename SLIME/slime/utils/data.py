@@ -21,6 +21,7 @@ def read_file(path):
 
 
 class Dataset:
+    '''加载数据后，将结构化的text转换为输入的长文本。'''
     def __init__(
         self,
         path,

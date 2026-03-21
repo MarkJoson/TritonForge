@@ -9,6 +9,7 @@ from .rollout import RolloutGroup
 
 @ray.remote(num_gpus=1)
 class InfoActor:
+    '''专门用于检查预分配资源结果，得到当前资源分配节点所在位置，用于之后对sglang等资源的分配'''
     def get_ip_and_gpu_id(self):
         return ray.util.get_node_ip_address(), ray.get_gpu_ids()[0]
 
@@ -35,7 +36,14 @@ def sort_key(x):
 
 
 def _create_placement_group(num_gpus):
-    """Create a placement group with the specified number of GPUs."""
+    """Create a placement group with the specified number of GPUs. \\
+    创建bundle和placement_group，预留ray资源； \\
+    创建InfoActor，获得InfoActor的IP+GPU_ID（用于之后的Sglang），而后Kill所有InfoAcor； \\
+    按照IP+GPUid排序并返回
+    返回值:
+        pg: ray.util.placement_group
+        pg_recordered_bundle_indices: {}
+    """
     bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_gpus)]
     pg = placement_group(bundles, strategy="PACK")
     num_bundles = len(bundles)
@@ -56,8 +64,8 @@ def _create_placement_group(num_gpus):
     for actor in info_actors:
         ray.kill(actor)
 
-    bundle_infos = [(i, gpu_ids[i][0], gpu_ids[i][1]) for i in range(num_bundles)]
-    pg_reordered_bundle_indices = [bundle_info[0] for bundle_info in sorted(bundle_infos, key=sort_key)]
+    bundle_infos = [(i, gpu_ids[i][0], gpu_ids[i][1]) for i in range(num_bundles)]      # [(i, ip, gpu_id)]
+    pg_reordered_bundle_indices = [bundle_info[0] for bundle_info in sorted(bundle_infos, key=sort_key)]        # 按照IP和GPUId排序
     for i in range(num_bundles):
         actual_bundle_index = pg_reordered_bundle_indices[i]
         print(
@@ -69,7 +77,15 @@ def _create_placement_group(num_gpus):
 
 
 def create_placement_groups(args):
-    """Create placement groups for actor and rollout engines."""
+    """Create placement groups for actor and rollout engines.
+    debug_train_only: 只有train节点, actor节点数*actor每节点gpu数
+    debug_rollout_only: 只有rollout节点
+    colocate: 同train_only
+    other: rollout节点+train节点
+    返回值:
+        train actor 对应的 bundle ids
+        rollout 对应的 bundle ids
+    """
 
     num_gpus = 0
     if args.debug_train_only:
@@ -106,6 +122,7 @@ def allocate_train_group(num_nodes, num_gpus_per_node, pg):
 
 
 def create_actor_group(args, pg):
+    '''创建RayTrainGroup并完成资源分配'''
     actor_model = allocate_train_group(
         num_nodes=args.actor_num_nodes,
         num_gpus_per_node=args.actor_num_gpus_per_node,

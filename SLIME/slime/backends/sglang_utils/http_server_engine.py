@@ -10,7 +10,7 @@ from urllib3.exceptions import NewConnectionError
 
 
 def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
-
+    '''启动server_process, 并尝试 health_generate, flush_cache 直到成功。'''
     p = multiprocessing.Process(target=launch_server, args=(server_args,))
     p.start()
 
@@ -64,6 +64,7 @@ class HttpServerEngineAdapter:
     """
 
     def __init__(self, router_ip=None, router_port=None, **kwargs):
+        '''创建一个sglang推理进程，而后注册到router上'''
         self.router_ip = router_ip
         self.router_port = router_port
         self.server_args = ServerArgs(**kwargs)
@@ -109,7 +110,7 @@ class HttpServerEngineAdapter:
         return self._make_request(
             "update_weights_from_tensor",
             {
-                "serialized_named_tensors": serialized_named_tensors,
+                "serialized_named_tensors": serialized_named_tensors,       # 只传输句柄...
                 "load_format": load_format,
                 "flush_cache": flush_cache,
             },

@@ -22,7 +22,9 @@ def get_base_gpu_id(args, rank):
 
 
 class SglangEngine:
-
+    '''
+        # TODO. 跨节点的分配是如何做到的？
+    '''
     def __init__(self, args, rank, dist_init_addr, port, nccl_port):
         self.args = args
 
@@ -54,7 +56,8 @@ class SglangEngine:
             # always skip warmup to prevent warmup timeout.
             "skip_server_warmup": True,
         }
-
+        
+        # 移除参数sglang_前缀
         unused_keys = set(kwargs.keys())
         for attr in dataclasses.fields(ServerArgs):
             if hasattr(args, f"sglang_{attr.name}") and attr.name not in kwargs:
@@ -66,7 +69,8 @@ class SglangEngine:
             print(f"Warning: The following arguments is not supported in the current sglang: {unused_keys}.")
             for key in unused_keys:
                 kwargs.pop(key)
-
+        
+        # 开启一个subprocess: sglang.srt.entrypoints.http_server, 并注册到router上
         self.llm = HttpServerEngineAdapter(
             router_ip=args.sglang_router_ip, router_port=args.sglang_router_port, **kwargs
         )

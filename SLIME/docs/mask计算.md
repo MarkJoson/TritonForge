@@ -46,11 +46,11 @@ test_messages = [
 apply_chat_template(test_messages) 产生：
 ┌──────────────────────┬───────────────┬──────────────────┬───────────────┬──────────────┐
 │ default_system_tokens│ msg1_overhead │ raw_test_tokens  │ msg2_overhead │ raw + end    │
-│ (默认系统消息)        │ (<|im_start|> │ "FOR TESTING     │ (<|im_start|> │              │
-│                      │  user\n)       │  ONLY"           │  user\n)       │              │
+│ (默认系统消息)         │ (<|im_start|> │ "FOR TESTING     │ (<|im_start|> │              │
+│                      │  user\n)      │   ONLY"          │  user\n)      │              │
 ├──────────────────────┴───────────────┴──────────────────┴───────────────┴──────────────┤
 │ 0                    idx_1           idx_1+len(raw)     idx_2           len(total)     │
-└───────────────────────────────────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - `overhead = (idx_2 - idx_1) - end_interval - len(raw)` → 每条消息的格式开销
@@ -116,8 +116,8 @@ message_ids = tailed_message_ids[:-len(prefix_token_ids)]  # 切掉尾巴
 apply_chat_template([msg_0, prefix_message]) 产生：
 
 ┌───────────────────────────────────────┬──────────────────────────────────────┐
-│           msg_0 的完整 token          │  prefix_message 的完整 token          │
-│  (包含 system 行为 + 内容 + 结尾)      │  (与 prefix_token_ids 相同)           │
+│           msg_0 的完整 token           │  prefix_message 的完整 token          │
+│  (包含 system 行为 + 内容 + 结尾)       │  (与 prefix_token_ids 相同)           │
 └───────────────────────────────────────┴──────────────────────────────────────┘
 ├────────── 我们想要的部分 ──────────────┤├──── 切掉 -len(prefix_token_ids) ────┤
 ```
