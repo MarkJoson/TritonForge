@@ -444,6 +444,23 @@ def read_data_into_queue(
                 actual_skipped_ids.append(item["instance_id"])
                 continue
             items.append(item)
+    
+    '''{
+            "prompt": [
+                {"role": "system",  "content": "You are an expert in writing Triton kernels for efficient GPU programming."},
+                {"role": "user", "content": "..."}
+            ]
+            "label: {...},
+            "extra_info": {
+                "level": 1, 
+                "problem_id": "62", 
+                "problem_name": "conv_standard_2D__square_input__asymmetric_kernel", 
+                "data_source": "kernel_bench_triton", 
+                "task_type": "kernelbench"
+            }, 
+            "instance_id": "kernel_bench_triton_lv1_62"
+        }
+    '''
 
     random.shuffle(items)  # shuffle items
     logger.info(f"Read {len(items)} items, skipped {len(actual_skipped_ids)} items")
@@ -468,6 +485,25 @@ def read_data_into_queue(
                 while task_queue.full():
                     time.sleep(1)
                 task_queue.put(item_repeat)
+                
+                '''{
+                        "uid":...
+                        "rollout_index": ...
+                        "prompt": [
+                            {"role": "system",  "content": "You are an expert in writing Triton kernels for efficient GPU programming."},
+                            {"role": "user", "content": "..."}
+                        ]
+                        "label: {...},
+                        "extra_info": {
+                            "level": 1, 
+                            "problem_id": "62", 
+                            "problem_name": "conv_standard_2D__square_input__asymmetric_kernel", 
+                            "data_source": "kernel_bench_triton", 
+                            "task_type": "kernelbench"
+                        }, 
+                        "instance_id": "kernel_bench_triton_lv1_62"
+                    }
+                '''
 
     # Put STOP signal for each process
     for _ in range(num_process):

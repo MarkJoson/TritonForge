@@ -372,9 +372,9 @@ async def generate_agent_rollout(
         # 示例：5 条消息 [sys, user, asst, user, asst]
         #   全序列:       [s s s | u u u | 0 0 1 1 1 | u u u | 0 0 1 1 1]
         #   full mask:    [0 0 0 | 0 0 0 | 0 0 1 1 1 | 0 0 0 | 0 0 1 1 1]
-        #                                  ↑ 第一个1
+        #                                      ↑ 第一个1
         #   response_length = 从第一个1到末尾 = 11
-        #   截取后 mask:              [0 0 1 1 1 | 0 0 0 | 0 0 1 1 1]  (长度=11)
+        #   截取后 mask:              [1 1 1 | 0 0 0 | 0 0 1 1 1]  (长度=11)
         # ────────────────────────────────────────────
         response_length = mask_generator.get_response_lengths([loss_mask])[0]
 

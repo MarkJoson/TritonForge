@@ -579,19 +579,60 @@ def save_data_to_local(data):
 
 
 def run_rollout(data: dict):
+    ''' 创建RolloutBuffer、加载generator，并执行 run_rollout 函数
+    data: {
+        task_type: generator名称 / 任务类型
+        input_file: 数据集文件地址
+        num_epoch: rollout任务总共进行的总数据集上的迭代次数
+        num_process: rollout子进程数量
+        
+        sampling_params:
+        max_turns:
+        gamma:
+        remote_engine_url:
+        remote_buffer_url:
+        remote_eval_server_url:
+        num_repeat_per_sample:
+        skip_instance_ids:
+        eval_concurrency:
+        
+        group_timeout_seconds:
+        min_timeout_group_size_ratio:
+        min_valid_group_size_ratio:
+        min_valid_item_size_ratio:
+        extra_info: {...}
+    }
+    '''
+    
     global buffer
+    
     # Auto-discover generators
+    # 根据 给定的 task_type 发现generators
     generator_map = discover_generators()
-
     task_type = data["task_type"]
     if task_type not in generator_map:
         print(f"Error: No generator found for task_type '{task_type}'")
         print(f"Available generators: {list(generator_map.keys())}")
         return
-
     generator_info = generator_map[task_type]
     print(f"Using generator: {generator_info['file_path']} for task_type: {task_type}")
 
+    '''
+    generator:{
+        # 必备
+        module: 
+        file_path:
+        run_rollout: 函数...
+        
+        # 可选：
+        normalize_group_data:
+        pad_group_data:
+        is_valid_group:
+        get_group_data_meta_info:
+        filter_item:
+    }
+    '''
+    
     # Extract processing functions from generator
     normalize_func = generator_info.get("normalize_group_data")
     pad_func = generator_info.get("pad_group_data")
@@ -639,6 +680,7 @@ def run_rollout(data: dict):
 
 @app.post("/start_rollout")
 async def start_rollout(request: Request, background: BackgroundTasks):
+    '''控制采样线程启动'''
     payload = await request.json()
     background.add_task(run_rollout, payload)
     return {"message": "Rollout started"}

@@ -226,6 +226,7 @@ def calculate_aggregated_return(
     for t, reward in enumerate(turn_rewards):
         aggregated_return += (gamma**t) * reward
 
+    # ! 将之前的reward累计到最后？是不是有点问题？还是我理解错误了
     return aggregated_return
 
 
@@ -239,7 +240,7 @@ def rollout_multi_turn_trajectory(
     max_turns: int = DEFAULT_MAX_TURNS,
     gamma: float = DEFAULT_GAMMA,
     baseline_timings: Optional[Dict] = None,
-    use_native_template: bool = True,
+    use_native_template: bool = True,                   # 使用默认设置=True
 ) -> Tuple[List[dict], float, List[float], List[dict]]:
     """Execute multi-turn rollout for kernel generation.
 
@@ -253,10 +254,35 @@ def rollout_multi_turn_trajectory(
         max_turns: Maximum number of turns
         gamma: Discount factor for aggregated return
         baseline_timings: Baseline timing data for performance comparison
+    
+    参数:
+        use_native_template(默认True): 
+            True: 所有轮次在同一个 messages 列表中累积，自然多轮对话
+            False: 每轮重新从 `original_prompt` 构造，将历史以文本形式拼入 user 消息
 
     Returns:
         Tuple of (final_messages, aggregated_return, turn_rewards, history)
     """
+    
+    '''item:
+        {
+            "uid":...
+            "rollout_index": ...
+            "prompt": [
+                {"role": "system",  "content": "You are an expert in writing Triton kernels for efficient GPU programming."},
+                {"role": "user", "content": "..."}
+            ]
+            "label: {...},
+            "extra_info": {
+                "level": 1, 
+                "problem_id": "62", 
+                "problem_name": "conv_standard_2D__square_input__asymmetric_kernel", 
+                "data_source": "kernel_bench_triton", 
+                "task_type": "kernelbench"
+            }, 
+            "instance_id": "kernel_bench_triton_lv1_62"
+        }
+    '''
     original_prompt = item["prompt"]
     history = []
     turn_rewards = []
@@ -267,6 +293,7 @@ def rollout_multi_turn_trajectory(
         if KERNELBENCH_COT_SETTINGS.get("strip_think_tags", True):
             # Strip thinking tags for code extraction and evaluation
             # But preserve original content for training
+            # cleaned_content: 不包含思维链
             cleaned_content, thinking_content = strip_thinking_tags(content)
         else:
             # Don't strip if disabled in config
@@ -274,6 +301,7 @@ def rollout_multi_turn_trajectory(
             thinking_content = ""
         
         # Extract kernel code from cleaned content (without think tags if stripped)
+        # 这里提取出来的kernel code不会传递给 eval_request
         kernel_code = extract_last_code(cleaned_content, strip_think_tags=False)  # Already handled above
 
         # Create evaluation item with cleaned content for evaluation
@@ -285,6 +313,35 @@ def rollout_multi_turn_trajectory(
             "content": cleaned_content  # Use cleaned content for evaluation
         })
         eval_item["messages"] = eval_messages
+        
+        # 提交 evaluate server 对 kernel 进行评估，拿到Kernel Evaluate Result
+        '''
+        KernelEvalResult(
+            eval_status="completed",
+            eval_response=response,
+            completed_at=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            reward=reward,
+            exec_result=exec_result,
+        )
+        
+        response(str):
+            no custom model source found /
+            Submission failed validation: must contain @triton.jit kernel with Triton operations /
+            Current implementation con't pass compile check /
+            Current implementation passes compile check but fails correctness check /
+            Current implementation passes correctness check
+            (Speedup: {speedup:.2f}x, Runtime: {exec_result.runtime:.3f}ms vs Baseline: {baseline_runtime:.3f}ms)s
+            
+        reward: 
+            Speedup of 1.0 = no improvement, 2.0 = 2x faster
+            Cap the performance reward at 2.0 for 3x speedup or better
+        
+        exec_result，EvalServer的直接返回结果:
+            compiled
+            correctness
+            runtime
+            
+        '''
         
         eval_result = submit_kernel_eval_request(
             eval_semaphore,
@@ -309,7 +366,14 @@ def rollout_multi_turn_trajectory(
     ]
     
     for turn_idx in range(max_turns):
-        if use_native_template:
+        if use_native_template:             # 代码使用默认设置 use_native_template=True
+            '''
+            LLM 请求信息: [
+                {"role": "system",  "content": ...},
+                {"role": "user", "content": ...}
+            ]
+            '''
+            
             # Log the current message count and last message role for debugging
             logger.info(f"[Turn {turn_idx}] Starting with {len(messages)} messages, last role: {messages[-1]['role'] if messages else 'None'}")
             
@@ -336,6 +400,18 @@ def rollout_multi_turn_trajectory(
                 }
 
             messages.append(assistant_message)
+            
+            ''' messages 内容
+            [
+                {"role": "system",  "content": ...},
+                {"role": "user", "content": ...}
+                {"role": "assistant", "content": ...}
+                ...
+                {"role": "user", "content": ...}
+                {"role": "assistant", "content": ...}
+            ]
+            '''
+            
         else:
             # Construct prompt with history
             prompt = construct_multi_turn_prompt(original_prompt, turn_idx, history)
@@ -362,7 +438,35 @@ def rollout_multi_turn_trajectory(
 
             # Build messages for evaluation
             messages = prompt + [assistant_message] # in this case we don't accumulate messages
+        
+        
+        '''
+        KernelEvalResult(
+            eval_status="completed",
+            eval_response=response,
+            completed_at=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            reward=reward,
+            exec_result=exec_result,
+        )
+        
+        response(str):
+            no custom model source found /
+            Submission failed validation: must contain @triton.jit kernel with Triton operations /
+            Current implementation con't pass compile check /
+            Current implementation passes compile check but fails correctness check /
+            Current implementation passes correctness check
+            (Speedup: {speedup:.2f}x, Runtime: {exec_result.runtime:.3f}ms vs Baseline: {baseline_runtime:.3f}ms)s
             
+        reward: 
+            Speedup of 1.0 = no improvement, 2.0 = 2x faster
+            Cap the performance reward at 2.0 for 3x speedup or better
+        
+        exec_result，EvalServer的直接返回结果:
+            compiled
+            correctness
+            runtime
+            
+        '''
         kernel_code, eval_result, thinking_content = eval_content(assistant_content)
 
         # Extract reward and evaluation details
@@ -391,6 +495,7 @@ def rollout_multi_turn_trajectory(
             history_entry["original_content"] = assistant_content  # Full response with think tags
 
         # Calculate speedup if applicable
+        # baseline_timings 来自 MultiTurnKernelGenerator init阶段加载的H100的速率基准文件.
         if hasattr(eval_result, "exec_result") and eval_result.exec_result.runtime > 0 and baseline_timings:
             extra_info = item.get("extra_info", {})
             level = extra_info.get("level", None)
@@ -441,6 +546,7 @@ def rollout_multi_turn_trajectory(
             break
 
         # Add improvement instruction for next turn (if not the last turn)
+        # Improvement信息一定会加，除了最后一个结束轮次
         if use_native_template and turn_idx < max_turns - 1:
             # Build improvement instruction based on evaluation results
             improvement_parts = []
@@ -466,6 +572,22 @@ def rollout_multi_turn_trajectory(
                 "role": "user",
                 "content": "\n".join(improvement_parts)
             }
+            
+            '''improvement_message:
+            Based on the previous attempt above, generate an improved kernel that:
+            *1. Fixes the compilation errors
+            *1. Fixes the correctness issues
+            *1. Maintains correctness
+            
+            2. Improves performance if possible
+            3. Maintains the same functionality as required
+            
+            *Error from previous attempt:
+                ... 
+            
+            Please generate the improved kernel code:
+            '''
+            
             messages.append(improvement_message)
             logger.debug(f"Added improvement instruction for turn {turn_idx + 1}")
 
@@ -499,7 +621,7 @@ def worker_process_multi_turn(
             break
 
         # Execute multi-turn rollout
-        messages, aggregated_return, turn_rewards, history = rollout_func(
+        messages, aggregated_return, turn_rewards, history = rollout_func(      # rollout_multi_turn_trajectory
             item,
             client,
             sampling_params,
@@ -637,7 +759,13 @@ class MultiTurnKernelGenerator(BaseGenerator):
         logger.info(f"Multi-turn kernel generator initialized with max_turns={max_turns}, gamma={gamma}")
 
     def rollout_one_epoch(self, input_file, rollout_func):
-        """Execute one epoch of multi-turn rollout."""
+        """启动子进程：
+            采样进程*N: worker_process_multi_turn,
+                In: task_queue
+                Out: done_queue (str: COMPLETE / dict {reward:..., instance_id:..., multi_turn_data:...})
+            数据加载进程: read_data_into_queue
+                Out: task_queue (str: STOP / )
+        """
         processes = []
         for _ in range(self.num_process):
             process = Process(
@@ -679,6 +807,49 @@ class MultiTurnKernelGenerator(BaseGenerator):
         num_finished = 0
         while num_finished < self.num_process:
             item = self.done_queue.get()
+            
+            '''
+            done_queue的值 item: str / dict:
+            {
+                uid:...,
+                messages:...,
+                reward:...,
+                instance_id:..., 
+                
+                extra_info: {
+                    ...,
+                    instance_id:...,
+                    turn_rewards:...,
+                    history:...,
+                    num_turns:...,
+                    rollout_index:...,
+                    timestamp:...,
+                }
+            
+            execution_details: {
+                num_turns: ...
+                turn_rewards: ...
+                aggregated_return: ...
+                
+                # 当有历史的时候，下面四个字段存在
+                *final_compiled: ...
+                *final_correctness: ...
+                *final_runtime: ...
+                *final_speedup: ...
+            }
+
+            "multi_turn_data": {
+                "history": history,
+                "turn_rewards": turn_rewards,
+                "aggregated_return": aggregated_return,
+                "gamma": gamma,
+                "max_turns": max_turns,
+            },
+
+            
+            采样进程 ==done_queue==> rollout_one_epoch  ==/buffer/write==> remote buffer @ slime_plugin.buffer
+            '''
+            
             if item == "COMPLETE":
                 num_finished += 1
             else:
